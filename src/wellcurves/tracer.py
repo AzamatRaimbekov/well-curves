@@ -297,10 +297,13 @@ def _intervals(row: np.ndarray) -> np.ndarray:
 
 def viterbi(mask: np.ndarray, seed_x: float | None = None, wrap: bool = True, edge: int = 12,
             jump_cost: float = 1.0, max_skip: int = 60, skip_cost: float = 3.0,
-            width_cost: float = 0.02, slope_cost: float = 0.0):
-    """Оптимальный путь по интервалам строк. Возвращает для каждой строки выбранный интервал (или None)
-    и сдвиг уровня шкалы."""
+            width_cost: float = 0.02, slope_cost: float = 0.0, left=None, right=None):
+    """Оптимальный путь по интервалам строк. left/right — положение краёв дорожки в каждой строке (в координатах
+    маски): на перекошенном скане рамка уезжает, и «кривая у края» надо мерить от края в этой строке.
+    Возвращает для каждой строки выбранный интервал (или None) и сдвиг уровня шкалы."""
     h, w = mask.shape
+    left = np.zeros(h) if left is None else np.asarray(left, float)
+    right = np.full(h, w - 1.0) if right is None else np.asarray(right, float)
     cands = [_intervals(mask[y]) for y in range(h)]
     # состояние: (строка, индекс интервала). Переход может перепрыгнуть до max_skip пустых строк.
     INF = 1e18
@@ -333,10 +336,10 @@ def viterbi(mask: np.ndarray, seed_x: float | None = None, wrap: bool = True, ed
             dl = np.zeros_like(g)
             if wrap:
                 # перехлёст: предыдущий у правого края, текущий у левого → уровень +1 (и наоборот)
-                right_to_left = (pc[:, None, 1] >= w - edge) & (c[None, :, 0] <= edge)
-                left_to_right = (pc[:, None, 0] <= edge) & (c[None, :, 1] >= w - edge)
-                gw1 = (w - 1 - pc[:, None, 1]) + c[None, :, 0]
-                gw2 = pc[:, None, 0] + (w - 1 - c[None, :, 1])
+                right_to_left = (pc[:, None, 1] >= right[py] - edge) & (c[None, :, 0] <= left[y] + edge)
+                left_to_right = (pc[:, None, 0] <= left[py] + edge) & (c[None, :, 1] >= right[y] - edge)
+                gw1 = np.maximum(0, right[py] - pc[:, None, 1]) + np.maximum(0, c[None, :, 0] - left[y])
+                gw2 = np.maximum(0, pc[:, None, 0] - left[py]) + np.maximum(0, right[y] - c[None, :, 1])
                 g = np.where(right_to_left & (gw1 < g), gw1, g)
                 dl = np.where(right_to_left & (gw1 <= g), 1, dl)
                 g2 = np.where(left_to_right & (gw2 < g), gw2, g)
@@ -416,7 +419,8 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
     else:
         path_mask = m
     chosen, level, _ = viterbi(path_mask, None if seed_x is None else seed_x - xl, wrap=wrap, jump_cost=jump_cost,
-                               slope_cost=slope_cost)
+                               slope_cost=slope_cost, left=np.asarray(x_left[:m.shape[0]]) - xl + pad,
+                               right=np.asarray(x_right[:m.shape[0]]) - xl - pad)
     h = m.shape[0]
     if wrap and not zigzag:
         level = relevel(chosen, m.shape[1], min_level, (max_level - 1) if max_level else 9)
