@@ -1,0 +1,19 @@
+{
+  "image": "data/reference/tz/2.tif",
+  "well": "Hosek Unit #1 ST #1",
+  "api": "42-493-32710",
+  "depth": {"unit": "ft", "ref": [[1719, 6500], [22112, 8500]], "snap": true},
+  "interval": [6500, 8500],
+  "step": 0.5,
+  "tracks": [
+    {"name": "Gamma MD", "left": 145.5, "right": 644.5,
+     "curves": [{"name": "Gamma API (MD)", "unit": "API", "min": 0, "max": 150, "wrap": [[150, 300], [300, 450]],
+                 "color": null, "seed_x": 372, "draw": [220, 30, 30]}]},
+    {"name": "Gamma TVD", "left": 755, "right": 1254.5,
+     "curves": [{"name": "Gamma API (TVD)", "unit": "API", "min": 0, "max": 150, "wrap": [[150, 300], [300, 450]],
+                 "color": null, "seed_x": 970, "draw": [20, 110, 230]}]},
+    {"name": "ROP", "left": 1254.5, "right": 1753.5,
+     "curves": [{"name": "ROP (MD)", "unit": "ft/hr", "min": 0, "max": 200, "wrap": [[200, 400], [400, 600]],
+                 "color": null, "draw": [20, 160, 60]}]}
+  ]
+}

@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.arslanbek/
+.env
+*.msi
+*.zip
+# данные компании и результаты — не в репозиторий
+data/*
+!data/jobs/
+data/jobs/*
+!data/jobs/_template.json
+output/
+results/
+kb/data/
+kb/board-analysis.md
+kb/docs/kaiten-rules.md
+!data/jobs/_example_auto.json
+# локальное (доступы и инструкции конкретной компании)
+CLAUDE.local.md
+.mcp.json
+.claude/skills/kaiten-*/
+tools/kaiten_*.py
+tools/kb_receiver.py
+kb/README.md
+.env.example

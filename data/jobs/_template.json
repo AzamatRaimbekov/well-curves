@@ -1,0 +1,19 @@
+{
+  "image": "data/inbox/WELL-1_2026-11-14_1.jpg",
+  "crop": null,
+  "orientation": "vertical",
+  "arg_name": "DEPT",
+  "arg_label": "Глубина, м",
+  "las_step": 0.2,
+  "meta": {"field": "", "well": "", "date": "", "source": "фото отчёта"},
+  "axes": {
+    "x": {"p1": [120, 0], "p2": [520, 150], "scale": "linear"},
+    "y": {"p1": [80, 1000], "p2": [1880, 1100], "scale": "linear"}
+  },
+  "curves": [
+    {"name": "GR", "unit": "API", "color_rgb": [30, 140, 40], "tol": 30, "max_gap": 15, "plot_rgb": [0, 150, 0]},
+    {"name": "RT", "unit": "Ohm.m", "color_rgb": [40, 40, 190], "tol": 30, "plot_rgb": [0, 0, 200],
+     "scale": "log", "axis": {"p1": [560, 1], "p2": [960, 1000], "scale": "log"}}
+  ],
+  "tracks": [["GR"], ["RT"]]
+}
