@@ -52,14 +52,28 @@ def snap_rows(dark: np.ndarray, x0: int, x1: int, y: float, radius: int = 25) ->
 
 
 class DepthMap:
+    """Строка скана ↔ глубина. Две опорные точки — прямая; больше — кусочно-линейно (скан растянут
+    неравномерно: на длинной ленте отметки 50 ft «уплывают» на 1–3 ft от прямой)."""
+
     def __init__(self, ref):
-        (self.y1, self.d1), (self.y2, self.d2) = ref
+        pts = sorted({(float(y), float(d)) for y, d in ref})
+        self.ys = np.array([p[0] for p in pts]); self.ds = np.array([p[1] for p in pts])
+        (self.y1, self.d1), (self.y2, self.d2) = pts[0], pts[-1]
+
+    @staticmethod
+    def _interp(v, xs, fs):
+        v = np.asarray(v, float)
+        out = np.interp(v, xs, fs)
+        lo, hi = v < xs[0], v > xs[-1]          # за крайними точками — продолжаем крайний отрезок
+        out = np.where(lo, fs[0] + (v - xs[0]) * (fs[1] - fs[0]) / (xs[1] - xs[0]), out)
+        out = np.where(hi, fs[-1] + (v - xs[-1]) * (fs[-1] - fs[-2]) / (xs[-1] - xs[-2]), out)
+        return out
 
     def depth(self, y):
-        return self.d1 + (np.asarray(y, float) - self.y1) * (self.d2 - self.d1) / (self.y2 - self.y1)
+        return self._interp(y, self.ys, self.ds)
 
     def row(self, d):
-        return self.y1 + (np.asarray(d, float) - self.d1) * (self.y2 - self.y1) / (self.d2 - self.d1)
+        return self._interp(d, self.ds, self.ys)
 
     @property
     def px_per_ft(self):
@@ -186,13 +200,15 @@ def resample(vals, step, d0, d1):
 
 
 # ---------------------------------------------------------------- основной прогон
-def run(job_path: str | Path) -> dict:
+def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path | None = None) -> dict:
+    """rgb / out_dir — для пакетной сверки: уже загруженный (обрезанный) скан и своя папка результата."""
     job_path = Path(job_path)
     job = json.loads(job_path.read_text(encoding="utf-8"))
     img_path = Path(job["image"])
     if not img_path.is_absolute():
         img_path = ROOT / img_path
-    rgb = np.array(Image.open(img_path).convert("RGB"))
+    if rgb is None:
+        rgb = np.array(Image.open(img_path).convert("RGB"))
     H, W = rgb.shape[:2]
     gray_dark = tracer.dark_mask(rgb.min(2))
 
@@ -207,7 +223,7 @@ def run(job_path: str | Path) -> dict:
     y0 = int(max(0, np.floor(dm.row(d_from))))
     y1 = int(min(H, np.ceil(dm.row(d_to)) + 1))
 
-    out_dir = ROOT / "output" / job_path.stem
+    out_dir = Path(out_dir) if out_dir else ROOT / "output" / job_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     color_i = 0
@@ -234,7 +250,8 @@ def run(job_path: str | Path) -> dict:
                                      used=used, jump_cost=cv.get("jump_cost", 1.0), x_range=cv.get("x_range"),
                                      slope_cost=cv.get("smooth", 0.0),
                                      centerline=cv.get("centerline", True),
-                                     min_level=-len(_wrap_lists(cv)[1]))
+                                     min_level=-len(_wrap_lists(cv)[1]), protect=bool(cv.get("straight")),
+                                     ink_reward=cv.get("ink_reward", 0.0))
             # уровни трассировщика: 0 = основной → 1 в .improj
             pts = [(x, y, _improj_level(lv), n) for x, y, lv, n in res.points]
             vals = points_to_values(pts, xl_fn, xr_fn, dm, cv)

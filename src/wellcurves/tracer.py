@@ -178,7 +178,7 @@ def periodic_rows(dark: np.ndarray) -> np.ndarray:
 
 
 def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_frac: float = 0.6, protect_x: float | None = None,
-               col_window: int = 400) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+               col_window: int = 400, track_protect: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """dark — bool-маска (кусок дорожки). Возвращает очищенную маску и маски строк/столбцов сетки."""
     m = dark.astype(np.uint8)
     if stroke > 1:
@@ -190,11 +190,18 @@ def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_fr
     # (сжатый лог, «гармошка») принимаются за линии сетки
     crisp = int((rmean > 0.92).sum()) >= max(3, h // 150)
     grid_rows = rmean > (0.88 if crisp else line_frac)
+    # stroke=2 — кривая 2 px на тонкой (1 px) сетке: тонкие линии уже снял проход 2x2, залечивать надо только
+    # толстые (которые его пережили). Иначе каждая линия сетки ±2 строки стирает пологие склоны пиков.
+    thin_grid = stroke == 2
+    if thin_grid:
+        grid_rows = m.mean(1) > 0.35
     core_rows = grid_rows.copy()
     dense = bool((~grid_rows).any()) and float(dark[~grid_rows].mean()) > 0.10
     # скан бывает перекошен (дорожка «уезжает» на десятки px) — решётку ищем по блокам строк
     # 1) сплошные вертикальные линии: доля тёмного в скользящем окне строк (как раньше)
-    cs = np.cumsum(np.vstack([np.zeros((1, w)), m]), axis=0)
+    # тонкая сетка (stroke=2): проход 2x2 рвёт вертикальную линию на обрывки, и её доля падает ниже порога —
+    # обрывки остаются и путь «едет» по ним. Долю считаем по исходным чернилам.
+    cs = np.cumsum(np.vstack([np.zeros((1, w)), dark.astype(np.uint8) if stroke == 2 else m]), axis=0)
     win = min(col_window, h)
     frac = np.zeros((h, w))
     for y0 in range(0, h, win // 2):
@@ -226,6 +233,8 @@ def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_fr
                 break
         if not crisp:
             grow_r = grow
+        if thin_grid:
+            grow_r = 1
         if grow_r:
             grid_rows = cv2.dilate(grid_rows.astype(np.uint8)[:, None], np.ones((2 * grow_r + 1, 1), np.uint8))[:, 0].astype(bool)
     if grid_cols.any():
@@ -236,6 +245,17 @@ def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_fr
         if start.any():
             idx = np.flatnonzero(start) + lo
             grid_cols[:, max(0, idx.min() - 1):min(w, idx.max() + 2)] = False
+            # на перекошенном скане прямая кривая (CCL, Bit Size) уезжает вбок на несколько px —
+            # ведём защиту за линией блоками по 300 строк, иначе ниже её снимет чистка как линию сетки
+            cur = float(idx.mean())
+            for a in (range(300, h, 300) if track_protect else ()):
+                b = min(h, a + 300)
+                lo, hi = int(max(0, cur - 5)), int(min(w, cur + 6))
+                st = dark[a:b, lo:hi].mean(0) > 0.6
+                if st.any():
+                    idx = np.flatnonzero(st) + lo
+                    grid_cols[a:b, max(0, idx.min() - 1):min(w, idx.max() + 2)] = False
+                    cur = float(idx.mean())
     out = m.astype(bool).copy()
     # залечиваем строки сетки
     rows = np.flatnonzero(grid_rows)
@@ -262,7 +282,7 @@ def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_fr
             a, b = max(0, band[0] - 3), min(h, band[-1] + 4)
             thick = raw[a:b].sum(0)
             base = np.median(thick)
-            spike = thick >= base + 3
+            spike = thick >= base + (2 if thin_grid else 3)   # кривая 2 px, лежащая вдоль линии, добавляет 2 строки
             spike &= ~grid_cols[band[0]] if grid_cols.any() else spike
             if spike.any():
                 # убираем одиночные столбцы-шум, оставляем отрезки >= 3 px
@@ -283,6 +303,163 @@ def clean_mask(dark: np.ndarray, stroke: int = 3, line_frac: float = 0.5, col_fr
                 row[a:b + 1] = left or right
             out[y] = row
     return out, grid_rows, grid_cols
+
+
+def _run_span(m: np.ndarray):
+    """Для каждого пикселя чернил — начало и конец (включительно) горизонтального отрезка чернил, в который он входит."""
+    h, w = m.shape
+    pad = np.zeros((h, 1), np.int8)
+    d = np.diff(np.concatenate([pad, m.astype(np.int8), pad], 1), axis=1)
+    st, en = np.argwhere(d == 1), np.argwhere(d == -1)
+    out = []
+    for val in (st[:, 1].astype(np.int32), (en[:, 1] - 1).astype(np.int32)):
+        acc = np.zeros((h, w + 1), np.int32)
+        acc[st[:, 0], st[:, 1]] = val
+        np.subtract.at(acc, (en[:, 0], en[:, 1]), val)
+        out.append(np.cumsum(acc, 1)[:, :w])
+    return out[0], out[1]
+
+
+def _line_bands(dark: np.ndarray, blk: int, pair_thr: float, tol: int, min_support: float):
+    """Горизонтальные линии сетки: для каждого пикселя — границы полосы линии (первая и последняя строка),
+    −1 там, где линии нет.
+    Дорожка режется на блоки по blk столбцов; строка блока — кандидат, если она вместе с соседней заполнена
+    на pair_thr (линия на перекошенном скане «переступает» со строки на строку). Линия сетки идёт через всю
+    дорожку: кандидат принимается, если в ±tol строках он есть в min_support доле блоков. Пологий склон пика
+    занимает лишь часть ширины и не проходит."""
+    h, w = dark.shape
+    nb = max(1, int(np.ceil(w / blk)))
+    P = np.stack([dark[:, b * blk:min(w, (b + 1) * blk)].mean(1) for b in range(nb)], 1)      # h × nb
+    nxt = np.vstack([P[1:], np.zeros((1, nb))])
+    prv = np.vstack([np.zeros((1, nb)), P[:-1]])
+    pair = (P + nxt >= pair_thr) | (P + prv >= pair_thr)
+    member = pair & (P >= 0.15)
+    near = cv2.dilate(member.astype(np.uint8), np.ones((2 * tol + 1, 1), np.uint8)).astype(bool)
+    member &= (near.mean(1) >= min_support)[:, None]
+    # группы соседних строк-участников в каждом блоке
+    groups = []
+    for b in range(nb):
+        idx = np.flatnonzero(member[:, b])
+        if not idx.size:
+            continue
+        for g in np.split(idx, np.where(np.diff(idx) > 1)[0] + 1):
+            groups.append((0.5 * (g[0] + g[-1]), b, int(g[0]), int(g[-1])))
+    top = np.full((h, nb), -1, np.int32)
+    bot = np.full((h, nb), -1, np.int32)
+    if groups:
+        groups.sort()
+        cen = np.array([g[0] for g in groups])
+        cuts = np.flatnonzero(np.diff(cen) > tol + 2) + 1
+        for line in np.split(np.arange(len(groups)), cuts):          # одна линия сетки = группы с близким центром
+            gs = [groups[i] for i in line]
+            size = np.array([g[3] - g[2] + 1 for g in gs])
+            med = int(np.median(size))
+            fat = size > med + 1
+            if fat.any() and (~fat).sum() >= 2:
+                # в «толстых» блоках рядом с линией идёт склон кривой и раздувает полосу — берём полосу
+                # обычной толщины там, где линия проходит по соседним блокам
+                bb = np.array([g[1] for g in gs], float)
+                k, c0 = np.polyfit(bb[~fat], np.array([g[0] for g in gs])[~fat], 1) if (~fat).sum() >= 3                     else (0.0, float(np.median(np.array([g[0] for g in gs])[~fat])))
+            for g, f in zip(gs, fat):
+                t0, t1 = g[2], g[3]
+                if f and (~fat).sum() >= 2:
+                    c = k * g[1] + c0
+                    t0 = int(np.clip(np.floor(c - med / 2 + 0.5), g[2], g[3]))
+                    t1 = int(min(g[3], t0 + med))
+                top[t0:t1 + 1, g[1]] = t0
+                bot[t0:t1 + 1, g[1]] = t1
+    return np.repeat(top, blk, axis=1)[:, :w], np.repeat(bot, blk, axis=1)[:, :w]
+
+
+def _bridge_bands(dark: np.ndarray, out: np.ndarray, band: np.ndarray, max_gap: int, min_area: int = 12) -> None:
+    """Кривая, которая полого входит в линию сетки и какое-то время идёт внутри неё, после чистки рвётся:
+    кусок внутри полосы неотличим от линии. Кривая непрерывна — значит, если к полосе с одной стороны подходит
+    конец штриха (чернила касаются полосы только сверху или только снизу), а рядом, не дальше max_gap, такой же
+    конец, то между ними кривая шла по линии: возвращаем чернила полосы на этом отрезке (правит out на месте).
+    Крутое пересечение касается полосы и сверху, и снизу в одном месте — его не трогаем."""
+    h, w = dark.shape
+    n, lab, st, _ = cv2.connectedComponentsWithStats(out.astype(np.uint8), 8)
+    big = st[:, cv2.CC_STAT_AREA] >= min_area
+    big[0] = False
+    solid = big[lab]                                   # чернила настоящих штрихов (не пыль)
+    nb, blab, bst, _ = cv2.connectedComponentsWithStats(band.astype(np.uint8), 8)
+    for k in range(1, nb):
+        c0, r0, cw, ch = bst[k, 0], bst[k, 1], bst[k, 2], bst[k, 3]
+        if cw < 8:
+            continue
+        sub = blab[r0:r0 + ch, c0:c0 + cw] == k
+        has = sub.any(0)
+        top = r0 + sub.argmax(0)
+        bot = r0 + ch - 1 - sub[::-1].argmax(0)
+        cols = np.arange(c0, c0 + cw)
+        up = np.zeros(cw, bool)
+        dn = np.zeros(cw, bool)
+        ok = has & (top > 0)
+        up[ok] = solid[top[ok] - 1, cols[ok]]
+        ok = has & (bot < h - 1)
+        dn[ok] = solid[bot[ok] + 1, cols[ok]]
+        inb = (solid[r0:r0 + ch, c0:c0 + cw] & sub).any(0)
+        up |= inb
+        dn |= inb
+        touch = np.flatnonzero(up | dn)
+        if touch.size < 2:
+            continue
+        runs = np.split(touch, np.where(np.diff(touch) > 3)[0] + 1)
+        info = [(int(r[0]), int(r[-1]), bool(up[r].any()), bool(dn[r].any())) for r in runs]
+        i = 0
+        while i + 1 < len(info):
+            a0, a1, ua, da = info[i]
+            b0, b1, ub, db = info[i + 1]
+            if not (ua and da) and not (ub and db) and 0 < b0 - a1 - 1 <= max_gap:
+                seg = slice(a1 + 1, b0)
+                blk = sub[:, seg] & dark[r0:r0 + ch, c0 + a1 + 1:c0 + b0]
+                out[r0:r0 + ch, c0 + a1 + 1:c0 + b0] |= blk
+                i += 2
+            else:
+                i += 1
+
+
+def remove_grid_lines(dark: np.ndarray, protect_x: float | None = None, blk: int = 32, chunk: int = 1280) -> np.ndarray:
+    """Чистка тонкой сетки без морфологии (как снятие нотных линеек): в полосе линии сетки убираются чернила,
+    поперечный отрезок которых целиком лежит внутри полосы. Кривая, пересекающая линию или касающаяся её,
+    выходит за полосу и остаётся целой; пологий склон пика толщиной 1 px, не лежащий на линии, тоже остаётся
+    (открытие 2×2 его стирало). protect_x — столбец прямой кривой (CCL), которую нельзя снять как линию."""
+    h, w = dark.shape
+    top, bot = _line_bands(dark, blk, 0.6, 2 + w // 400, 0.6)
+    hband = top >= 0
+    vs, ve = _run_span(dark.T)
+    kill = hband & (vs.T >= top) & (ve.T <= bot) & dark
+    del vs, ve, top, bot
+    vband = np.zeros((h, w), bool)
+    cur = protect_x
+    for a in range(0, h, chunk):
+        b = min(h, a + chunk)
+        if b - a < 8 * blk and a > 0:
+            a = max(0, b - chunk)
+        part = dark[a:b]
+        lt, rt = _line_bands(part.T, blk, 0.5, 2, 0.6)
+        lt, rt = lt.T, rt.T
+        if cur is not None:                       # прямая кривая: ведём защиту за линией по блокам
+            lo, hi = int(max(0, cur - 5)), int(min(w, cur + 6))
+            cols = np.flatnonzero((lt[:, lo:hi] >= 0).mean(0) > 0.3) + lo
+            if cols.size:
+                c0, c1 = max(0, cols.min() - 1), min(w, cols.max() + 2)
+                lt[:, c0:c1] = -1
+                cur = float(cols.mean())
+        hs, he = _run_span(part)
+        vband[a:b] |= lt >= 0
+        kill[a:b] |= (lt >= 0) & (hs >= lt) & (he <= rt) & part
+    kill |= hband & vband & dark                   # перекрестья сетки
+    out = dark & ~kill
+    # пыль: одиночные пиксели и пары
+    n, lab, st, _ = cv2.connectedComponentsWithStats(out.astype(np.uint8), 8)
+    small = st[:, cv2.CC_STAT_AREA] <= 2
+    small[0] = False
+    out[small[lab]] = False
+    _bridge_bands(dark, out, hband, max_gap=220)
+    ot = np.ascontiguousarray(out.T)
+    _bridge_bands(np.ascontiguousarray(dark.T), ot, np.ascontiguousarray(vband.T), max_gap=120)
+    return np.ascontiguousarray(ot.T)
 
 
 def _intervals(row: np.ndarray) -> np.ndarray:
@@ -382,7 +559,7 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
                 clean: bool = True, zigzag: bool | None = None, max_level: int | None = None,
                 style: str | None = None, used: np.ndarray | None = None, jump_cost: float = 1.0,
                 x_range: tuple | None = None, slope_cost: float = 0.0, centerline: bool = False,
-                min_level: int = 0) -> TraceResult:
+                min_level: int = 0, protect: bool = False, ink_reward: float = 0.0) -> TraceResult:
     """dark_full — маска всего скана; x_left/x_right — края дорожки для строк y0..y1 (абсолютные)."""
     xl = int(np.floor(x_left.min())) + pad
     xr = int(np.ceil(x_right.max())) - pad
@@ -397,8 +574,12 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
         m &= ~thick
         if style in ("thin-solid", "thin-dashed"):
             m = style_filter(m, "solid" if style == "thin-solid" else "dashed", min_h=40, min_area=120, min_dash=3)
+    elif clean == "lines":                    # тонкая сетка 1 px: снимаем сами линии, без морфологии
+        m = remove_grid_lines(sub, protect_x=(seed_x - xl) if (seed_x is not None and protect) else None)
+        grid_rows = np.zeros(sub.shape[0], bool)
     elif clean:
-        m, grid_rows, _ = clean_mask(sub, stroke=stroke, protect_x=None if seed_x is None else seed_x - xl)
+        m, grid_rows, _ = clean_mask(sub, stroke=stroke, protect_x=None if seed_x is None else seed_x - xl,
+                                     track_protect=protect)
     else:
         m, grid_rows = sub.copy(), np.zeros(sub.shape[0], bool)
     if style in ("solid", "dashed"):
@@ -418,8 +599,10 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
         path_mask = skeletonize(m)
     else:
         path_mask = m
+    # ink_reward > 0: путь получает выигрыш за каждый пройденный пиксель чернил — иначе ему дешевле перепрыгнуть
+    # узкий пик (пропуск десятка строк), чем идти по склону, в котором после чистки сетки остались разрывы
     chosen, level, _ = viterbi(path_mask, None if seed_x is None else seed_x - xl, wrap=wrap, jump_cost=jump_cost,
-                               slope_cost=slope_cost, left=np.asarray(x_left[:m.shape[0]]) - xl + pad,
+                               slope_cost=slope_cost, width_cost=(-ink_reward if ink_reward else 0.02), left=np.asarray(x_left[:m.shape[0]]) - xl + pad,
                                right=np.asarray(x_right[:m.shape[0]]) - xl - pad)
     h = m.shape[0]
     if wrap and not zigzag:
