@@ -251,7 +251,9 @@ def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path
                                      slope_cost=cv.get("smooth", 0.0),
                                      centerline=cv.get("centerline", True),
                                      min_level=-len(_wrap_lists(cv)[1]), protect=bool(cv.get("straight")),
-                                     ink_reward=cv.get("ink_reward", 0.0))
+                                     ink_reward=cv.get("ink_reward", 0.0), width=cv.get("width"),
+                                     core=cv.get("core", 0.0), core_gain=cv.get("core_gain", 1.0),
+                                     dash_max=cv.get("dash_max", 24))
             # уровни трассировщика: 0 = основной → 1 в .improj
             pts = [(x, y, _improj_level(lv), n) for x, y, lv, n in res.points]
             vals = points_to_values(pts, xl_fn, xr_fn, dm, cv)
