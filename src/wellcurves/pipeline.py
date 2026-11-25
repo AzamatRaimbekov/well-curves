@@ -222,8 +222,11 @@ def _auto_styles(curves, rgb, left, right, y0, y1, W):
             cv = {**cv, **{k: v for k, v in p.items() if k not in cv or cv.get(k) is None or k == "style"}}
             if "style" not in p:             # прямая / тонкая / не распознано — старый режим
                 cv.pop("style", None)
+                cv.setdefault("_kind", "unknown")
         out.append(cv)
-    order = {"solid": 0, "dashed": 1}
+    # порядок обводки: уверенно распознанные сплошные → пунктиры → старый режим (тонкие 1 px, прямые,
+    # нераспознанные). Старый режим берёт чернила широко — пущенный первым, он «съедает» чужие линии
+    order = {"solid": 1, "thin-solid": 2, "dashed": 3, "thin-dashed": 4, "thin": 5, "straight": 5, "unknown": 5}
     return sorted(out, key=lambda c: order.get(c.get("_kind"), 0))
 
 

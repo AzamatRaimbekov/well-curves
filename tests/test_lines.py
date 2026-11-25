@@ -48,7 +48,7 @@ def test_thin_line():
     s = _wave(600, 200)
     _draw(a, s, 2)
     kinds, f = _kinds(a, [float(s[0])])
-    assert kinds == ["thin"], f
+    assert kinds == ["thin-solid"], f       # тонкая 2 px сплошная — режим толщины с порогом 2 px
 
 
 def test_probe_does_not_stick_to_grid():

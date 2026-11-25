@@ -46,7 +46,7 @@ def one_scan(args):
                     if f:
                         f = {**f, "dash_len": f.get("comp_med", 0) if (f.get("comp_med") or 99) < 60 else 0}
                         c.update({k: v for k, v in lines.classify(f).items()})
-                order = {"solid": 0, "dashed": 1}
+                order = {"solid": 0, "thin-solid": 1, "dashed": 2, "thin-dashed": 3}
                 job["tracks"][0]["curves"].sort(key=lambda c: order.get(c.get("_kind"), 0))
             elif auto:                            # тип линии и толщину программа определяет сама (lines.py)
                 for c in job["tracks"][0]["curves"]:

@@ -20,6 +20,7 @@ from . import strokes
 LONG = 60          # кусок чернил длиннее LONG px считается частью сплошной линии
 SOLID_MIN = 0.5    # long_frac ≥ SOLID_MIN → сплошная (по базе: ошибка «сплошная→пунктир» 6 из 62, она самая вредная)
 THIN = 3.5         # штрих тоньше THIN px — тонкая линия
+THIN_MODE = True   # тонкие 2–3 px — тоже режим толщины (порог 2 px); False — старый режим
 
 
 def path_features(dark: np.ndarray, W: np.ndarray, lab: np.ndarray, ext: np.ndarray, xs: np.ndarray,
@@ -63,8 +64,15 @@ def classify(f: dict | None) -> dict:
     if f.get("on_grid", 0) >= 0.5:      # прямая вдоль линии сетки (Bit Size и т.п.): режим толщины её снимет
         return {"_kind": "straight", **_f(f)}
     w = f["width"]
-    if w < THIN:                         # тонкая линия: режим толщины её теряет — старый режим
-        return {"_kind": "thin", **_f(f)}
+    if w < THIN:
+        if not THIN_MODE or w < 1.9:     # 1–1.5 px — как сетка: режим толщины её не отделит — старый режим
+            return {"_kind": "thin", **_f(f)}
+        # тонкая линия 2–3 px: порог толщины 2 px отсекает сетку в 1 px; различаем по рисунку штриха
+        if f["long_frac"] >= SOLID_MIN:
+            return {"style": "solid", "width": [2.0], "core": 3.0, "stroke_w": w, "ink_reward": 0.5,
+                    "_kind": "thin-solid", **_f(f)}
+        return {"style": "dashed", "width": [2.0], "core": 3.0, "ink_reward": 1.5, "core_gain": 2.0,
+                "dash_max": int(max(24, 2 * f.get("dash_len", 0))), "_kind": "thin-dashed", **_f(f)}
     lo = float(np.clip(np.floor(w) - 1, 2, 4))
     if f["long_frac"] >= SOLID_MIN:
         return {"style": "solid", "width": [lo], "core": lo + 1, "stroke_w": w, "ink_reward": 0.5, "_kind": "solid", **_f(f)}
@@ -115,7 +123,7 @@ def bridge_grid(ink: np.ndarray, grid: np.ndarray, reach: int = 4) -> np.ndarray
     return ink | (grid & (vert | horz))
 
 
-def recognize(sub: np.ndarray, seeds: list, left: np.ndarray, right: np.ndarray, rows: int = 700) -> list:
+def recognize(sub: np.ndarray, seeds: list, left: np.ndarray, right: np.ndarray, rows: int = 1500) -> list:
     """sub — маска чернил дорожки (строки интервала, столбцы дорожки); seeds — x старта каждой кривой (в координатах
     sub) или None. left/right — края дорожки по строкам (в координатах sub). Возвращает признаки для каждой кривой."""
     top = sub[: min(rows, sub.shape[0])]
@@ -135,15 +143,21 @@ def recognize(sub: np.ndarray, seeds: list, left: np.ndarray, right: np.ndarray,
             xs = follow(ink, s, lt, rt)
         if np.isfinite(xs).mean() < 0.3:            # своей линии без сетки нет: прямая вдоль сетки (Bit Size)
             xs = follow(top, s, lt, rt)
-        out.append(path_features(top, W, lab, ext, xs, grid=grid)); paths.append(xs)
-    # «щупы» двух кривых сошлись на одну линию (кривые стартуют рядом) — признаки относятся не к своей кривой.
-    # Такое распознавание ненадёжно: оставляем этим кривым старый режим
+        out.append(None); paths.append(xs)
+    # «щупы» кривых, стартующих рядом, идут вместе, пока кривые не разойдутся. Общие строки — не про эту кривую:
+    # признаки считаем только по своим строкам; если своих меньше 60 — тип не распознан (старый режим)
+    own = [None if p is None else np.isfinite(p) for p in paths]
     for i in range(len(paths)):
-        for j in range(i + 1, len(paths)):
-            a, b = paths[i], paths[j]
-            if a is None or b is None:
+        for j in range(len(paths)):
+            if i == j or paths[i] is None or paths[j] is None:
                 continue
-            both = np.isfinite(a) & np.isfinite(b)
-            if both.sum() > 30 and (np.abs(a[both] - b[both]) < 4).mean() > 0.5:
-                out[i] = out[j] = None
+            both = np.isfinite(paths[i]) & np.isfinite(paths[j])
+            same = np.zeros_like(both)
+            same[both] = np.abs(paths[i][both] - paths[j][both]) < 4
+            own[i] &= ~same
+    for i, p in enumerate(paths):
+        if p is None or own[i].sum() < 60:
+            continue
+        q = np.where(own[i], p, np.nan)
+        out[i] = path_features(top, W, lab, ext, q, grid=grid)
     return out
