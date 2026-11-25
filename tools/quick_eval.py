@@ -15,7 +15,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 
 def one_scan(args):
-    name, tag, win = args
+    name, tag, win, auto = args
+    prof = {}
+    if auto == "oracle":                      # тип линии из-под обводки исполнителя (потолок для распознавания)
+        for r in json.loads((ROOT / "output" / "report" / "line_profile.json").read_text(encoding="utf-8")):
+            prof[(r["api"], r["g"], r["curve"])] = r
     import numpy as np
     from PIL import Image
     from wellcurves import improj, pipeline, verify
@@ -35,6 +39,18 @@ def one_scan(args):
             job = job_from_improj.make(proj, tif.resolve(), gi)
             if not job["tracks"][0]["curves"]:
                 continue
+            if auto == "oracle":
+                from wellcurves import lines
+                for c in job["tracks"][0]["curves"]:
+                    f = prof.get((name, gi, c["name"]))
+                    if f:
+                        f = {**f, "dash_len": f.get("comp_med", 0) if (f.get("comp_med") or 99) < 60 else 0}
+                        c.update({k: v for k, v in lines.classify(f).items()})
+                order = {"solid": 0, "dashed": 1}
+                job["tracks"][0]["curves"].sort(key=lambda c: order.get(c.get("_kind"), 0))
+            elif auto:                            # тип линии и толщину программа определяет сама (lines.py)
+                for c in job["tracks"][0]["curves"]:
+                    c["style"] = "auto"
             (y1, d1), (y2, d2) = job["depth"]["ref"]
             if d1 == d2 or y1 == y2:
                 rows.append({"api": name, "g": gi, "status": "рамка эталона без глубин"})
@@ -46,6 +62,15 @@ def one_scan(args):
             ya = int(max(0, min(row(a), row(b)) - 80))
             yb = int(min(full.shape[0], max(row(a), row(b)) + 80))
             job["depth"]["ref"] = [[y1 - ya, d1], [y2 - ya, d2]]
+            # стартовая точка — где кривая эталона в начале окна (а не в начале всей обводки исполнителя)
+            ys0 = row(a)
+            g = improj.load(proj)["Grids"][gi]
+            for c in g["Curves"][0]["Items"]:
+                for cv in job["tracks"][0]["curves"]:
+                    if cv["name"] == c["Name"].strip() and c["Points"]:
+                        q = min(c["Points"], key=lambda q: abs(q["Y"] - ys0))
+                        if abs(q["Y"] - ys0) < 40:
+                            cv["seed_x"] = round(q["X"], 1)
             out = ROOT / "output" / "quick" / tag / f"{name}_g{gi}"
             out.mkdir(parents=True, exist_ok=True)
             jp = out / "job.json"
@@ -76,12 +101,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("tag"); ap.add_argument("apis", nargs="*")
     ap.add_argument("--win", type=float, default=400); ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--auto", action="store_true", help='всем кривым "style": "auto" (распознавание линии)')
+    ap.add_argument("--oracle", action="store_true", help="тип линии из line_profile.json (потолок распознавания)")
     a = ap.parse_args()
     names = [d.name for d in sorted((ROOT / "data" / "training").iterdir())
              if list(d.glob("*.improj")) and list(d.glob("*.tif")) and (not a.apis or d.name in a.apis)]
     rows = []
     with ProcessPoolExecutor(a.jobs) as ex:
-        for name, rs in zip(names, ex.map(one_scan, [(n, a.tag, a.win) for n in names])):
+        for name, rs in zip(names, ex.map(one_scan, [(n, a.tag, a.win, "oracle" if a.oracle else a.auto) for n in names])):
             rows += rs
             print(name, summary(rs), flush=True)
     out = ROOT / "output" / "report" / f"quick_{a.tag}.json"

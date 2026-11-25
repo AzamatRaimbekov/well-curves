@@ -200,6 +200,33 @@ def resample(vals, step, d0, d1):
 
 
 # ---------------------------------------------------------------- основной прогон
+def _auto_styles(curves, rgb, left, right, y0, y1, W):
+    """Кривые со "style": "auto" — тип линии и толщина определяются по скану (lines.py).
+    Возвращает новый список: сплошные раньше пунктиров (пунктир обводится по остаткам после сплошных)."""
+    auto = [cv for cv in curves if cv.get("style") == "auto" and cv.get("color") is None]
+    if not auto:
+        return curves
+    from . import lines
+    pad = 2
+    xl = int(np.floor(left.min())) + pad
+    xr = int(np.ceil(right.max())) - pad
+    mask = tracer.curve_mask(rgb, None, y0=y0, y1=y1, x0=max(0, xl - 5), x1=min(W, xr + 6))
+    sub = mask[y0:y1, xl:xr + 1]
+    seeds = [None if cv.get("seed_x") is None else cv["seed_x"] - xl for cv in auto]
+    feats = lines.recognize(sub, seeds, left - xl + pad, right - xl - pad)
+    out = []
+    for cv in curves:
+        if cv in auto:
+            f = feats[auto.index(cv)]
+            p = lines.classify(f)
+            cv = {**cv, **{k: v for k, v in p.items() if k not in cv or cv.get(k) is None or k == "style"}}
+            if "style" not in p:             # прямая / тонкая / не распознано — старый режим
+                cv.pop("style", None)
+        out.append(cv)
+    order = {"solid": 0, "dashed": 1}
+    return sorted(out, key=lambda c: order.get(c.get("_kind"), 0))
+
+
 def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path | None = None) -> dict:
     """rgb / out_dir — для пакетной сверки: уже загруженный (обрезанный) скан и своя папка результата."""
     job_path = Path(job_path)
@@ -240,7 +267,8 @@ def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path
         xl_fn = lambda y, ys=ys, left=left: float(np.interp(y, ys, left))
         xr_fn = lambda y, ys=ys, right=right: float(np.interp(y, ys, right))
         used = np.zeros((y1 - y0, W), bool) if len(tr["curves"]) > 1 else None
-        for cv in tr["curves"]:
+        curves = _auto_styles(tr["curves"], rgb, left, right, y0, y1, W)
+        for cv in curves:
             mask = tracer.curve_mask(rgb, cv.get("color"), cv.get("tol", 45), y0=y0, y1=y1,
                                      x0=max(0, int(left.min()) - 5), x1=min(W, int(right.max()) + 6))
             res = tracer.trace_track(mask, left, right, y0, y1, seed_x=cv.get("seed_x"),
@@ -253,7 +281,7 @@ def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path
                                      min_level=-len(_wrap_lists(cv)[1]), protect=bool(cv.get("straight")),
                                      ink_reward=cv.get("ink_reward", 0.0), width=cv.get("width"),
                                      core=cv.get("core", 0.0), core_gain=cv.get("core_gain", 1.0),
-                                     dash_max=cv.get("dash_max", 24))
+                                     dash_max=cv.get("dash_max", 24), stroke_w=cv.get("stroke_w", 0.0))
             # уровни трассировщика: 0 = основной → 1 в .improj
             pts = [(x, y, _improj_level(lv), n) for x, y, lv, n in res.points]
             vals = points_to_values(pts, xl_fn, xr_fn, dm, cv)
@@ -263,6 +291,11 @@ def run(job_path: str | Path, rgb: np.ndarray | None = None, out_dir: str | Path
                             "coverage": res.coverage, "draw": draw, "left": left, "right": right, "ys": ys})
 
     step = job.get("step", 0.5)
+    rec = [{"track": r["track"], "curve": r["curve"]["name"], "kind": r["curve"].get("_kind"),
+            "style": r["curve"].get("style"), "width": r["curve"].get("width"),
+            "features": r["curve"].get("_features")} for r in results if "_kind" in r["curve"]]
+    if rec:                                   # что программа распознала (тип линии, толщина) — для проверки
+        (out_dir / "line_styles.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     files = _write_outputs(job, results, dm, d_from, d_to, step, out_dir, rgb)
     report = {"image": str(img_path), "depth_ref": ref, "px_per_ft": round(dm.px_per_ft, 3),
               "interval": [d_from, d_to], "out": str(out_dir), "files": [str(f) for f in files], "curves": []}

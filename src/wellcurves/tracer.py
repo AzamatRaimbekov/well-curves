@@ -475,7 +475,7 @@ def _intervals(row: np.ndarray) -> np.ndarray:
 def viterbi(mask: np.ndarray, seed_x: float | None = None, wrap: bool = True, edge: int = 12,
             jump_cost: float = 1.0, max_skip: int = 60, skip_cost: float = 3.0,
             width_cost: float = 0.02, slope_cost: float = 0.0, left=None, right=None, weight=None,
-            weight_gain: float = 0.0):
+            weight_gain: float = 0.0, gain_cap: float = 30.0):
     """Оптимальный путь по интервалам строк. left/right — положение краёв дорожки в каждой строке (в координатах
     маски): на перекошенном скане рамка уезжает, и «кривая у края» надо мерить от края в этой строке.
     Возвращает для каждой строки выбранный интервал (или None) и сдвиг уровня шкалы."""
@@ -493,7 +493,9 @@ def viterbi(mask: np.ndarray, seed_x: float | None = None, wrap: bool = True, ed
             if len(c) == 0:
                 gains.append(np.zeros(0)); continue
             cs = np.concatenate([[0.0], np.cumsum(weight[y], dtype=float)])
-            gains.append((cs[c[:, 1] + 1] - cs[c[:, 0]]) * weight_gain)
+            # выигрыш не больше, чем у штриха шириной ~10 px: заливка/штриховка (сотни толстых пикселей в строке)
+            # иначе перетягивает путь на себя
+            gains.append(np.minimum(cs[c[:, 1] + 1] - cs[c[:, 0]], gain_cap) * weight_gain)
     # состояние: (строка, индекс интервала). Переход может перепрыгнуть до max_skip пустых строк.
     INF = 1e18
     cost = [np.full(len(c), INF) for c in cands]
@@ -567,13 +569,26 @@ def viterbi(mask: np.ndarray, seed_x: float | None = None, wrap: bool = True, ed
     return chosen, level, cands
 
 
+def _drop_long_runs(m: np.ndarray, max_len: int) -> np.ndarray:
+    """Убирает горизонтальные серии True длиннее max_len (с соседними строками ±1 — линия бывает толщиной 2–3 px)."""
+    if max_len < 20:
+        return m
+    k = np.ones((1, max_len), np.uint8)
+    long_ = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, k).astype(bool)
+    if not long_.any():
+        return m
+    long_ = cv2.dilate(long_.astype(np.uint8), np.ones((3, 1), np.uint8)).astype(bool)
+    return m & ~long_
+
+
 def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, y0: int, y1: int,
                 seed_x: float | None = None, stroke: int = 0, pad: int = 2, wrap: bool = True,
                 clean: bool = True, zigzag: bool | None = None, max_level: int | None = None,
                 style: str | None = None, used: np.ndarray | None = None, jump_cost: float = 1.0,
                 x_range: tuple | None = None, slope_cost: float = 0.0, centerline: bool = False,
                 min_level: int = 0, protect: bool = False, ink_reward: float = 0.0,
-                width: tuple | None = None, core: float = 0.0, core_gain: float = 1.0, dash_max: int = 24) -> TraceResult:
+                width: tuple | None = None, core: float = 0.0, core_gain: float = 1.0, dash_max: int = 24,
+                stroke_w: float = 0.0) -> TraceResult:
     """dark_full — маска всего скана; x_left/x_right — края дорожки для строк y0..y1 (абсолютные)."""
     xl = int(np.floor(x_left.min())) + pad
     xr = int(np.ceil(x_right.max())) - pad
@@ -587,8 +602,20 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
         W, grid = strokes.width_and_grid(sub)
         m = strokes.width_mask(sub, width[0], width[1] if len(width) > 1 else 99.0, W=W, grid=grid)
         grid_rows = np.zeros(sub.shape[0], bool)
-        if core:
+        if stroke_w:
+            # выигрыш за штрих ОЖИДАЕМОЙ толщины (распознана у этой кривой): заливка и штриховка толще — не тянут
+            wt = np.clip(1.0 - np.abs(W - stroke_w) / 2.0, 0.0, 1.0) * m
+        elif core:
             wt = np.clip(W - (core - 1.0), 0.0, 3.0) * m
+        # стык листов скана / толстая поперечная полоса: строки, залитые почти на всю ширину дорожки.
+        # По ним путь «съезжает» на чужую кривую — убираем, Витерби перепрыгнет полосу, сохранив положение
+        band = sub.mean(1) > 0.5
+        if band.any():
+            band = np.convolve(band, np.ones(7), "same") > 0
+            m[band] = False
+        # горизонтальный отрезок шире 60 % дорожки (край листа, подпись, линия рамки): по нему путь бесплатно
+        # переезжает на чужую кривую. Пик кривой так широко почти не бывает — такие отрезки убираем
+        m = _drop_long_runs(m, int(0.6 * sub.shape[1]))
         if style == "dashed":
             # пунктир ищем среди компонент маски с низким порогом: там сплошные линии (температура, рамка,
             # соседняя кривая) связны и длинны, а штрихи пунктира остаются короткими отдельными компонентами
@@ -632,7 +659,8 @@ def trace_track(dark_full: np.ndarray, x_left: np.ndarray, x_right: np.ndarray, 
     # узкий пик (пропуск десятка строк), чем идти по склону, в котором после чистки сетки остались разрывы
     chosen, level, _ = viterbi(path_mask, None if seed_x is None else seed_x - xl, wrap=wrap, jump_cost=jump_cost,
                                slope_cost=slope_cost, width_cost=(-ink_reward if ink_reward else 0.02), left=np.asarray(x_left[:m.shape[0]]) - xl + pad,
-                               right=np.asarray(x_right[:m.shape[0]]) - xl - pad, weight=wt, weight_gain=core_gain)
+                               right=np.asarray(x_right[:m.shape[0]]) - xl - pad, weight=wt, weight_gain=core_gain,
+                               gain_cap=(3.0 * stroke_w) if stroke_w else 30.0)
     h = m.shape[0]
     if wrap and not zigzag:
         level = relevel(chosen, m.shape[1], min_level, (max_level - 1) if max_level else 9)
