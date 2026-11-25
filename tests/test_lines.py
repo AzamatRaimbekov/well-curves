@@ -59,3 +59,19 @@ def test_probe_does_not_stick_to_grid():
     h, w = a.shape
     f = lines.recognize(a, [float(s[0])], np.zeros(h), np.full(h, w - 1.0))[0]
     assert f["width"] >= 4 and f["long_frac"] > 0.8, f
+
+
+def test_joint_probes_split_after_crossing():
+    """Две кривые пересекаются: совместные «щупы» после пересечения расходятся каждый по своей линии."""
+    h, w = 600, 400
+    a = np.zeros((h, w), bool)
+    xa = np.full(h, 150)                         # прямая (как Bit Size)
+    xb = _wave(h, 150, amp=80, period=600)       # кривая, дважды пересекающая прямую
+    _draw(a, xa, 4)
+    _draw(a, xb, 6)
+    W, _ = lines.strokes.width_and_grid(a)
+    paths, _ = lines.follow_joint(a & (W >= 2.0), [150.0, 150.0 + 1e-3 + 0.0], np.zeros(h), np.full(h, w - 1.0))
+    p0, p1 = paths
+    for y in (100, 150, 200):                    # кривая ушла вправо — пути на разных линиях
+        assert {round(p0[y]), round(p1[y])} != {round(p0[y])}, (p0[y], p1[y])
+    assert abs(p0[150] - 150) < 4 or abs(p1[150] - 150) < 4

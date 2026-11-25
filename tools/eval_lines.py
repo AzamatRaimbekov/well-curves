@@ -14,7 +14,9 @@ def main():
     import job_from_improj
     Image.MAX_IMAGE_PIXELS = None
     ap = argparse.ArgumentParser(); ap.add_argument("apis", nargs="*"); ap.add_argument("--win", type=float, default=400)
+    ap.add_argument("--joint", default="{}")
     a = ap.parse_args()
+    lines.JOINT.update(json.loads(a.joint))
     prof = {(r["api"], r["g"], r["curve"]): r for r in
             json.loads((ROOT / "output/report/line_profile.json").read_text(encoding="utf-8"))}
     names = sorted({k[0] for k in prof if not a.apis or k[0] in a.apis})
@@ -37,7 +39,7 @@ def main():
                 continue
             row = lambda dd: y1 + (dd - d1) * (y2 - y1) / (d2 - d1)
             ya = int(max(0, row(job["interval"][0])))
-            yb = int(min(im.size[1], ya + 700))
+            yb = int(min(im.size[1], ya + 1500))
             tr = job["tracks"][0]
             xl = int(np.floor(tr["left"])) + 2; xr = int(np.ceil(tr["right"])) - 2
             rgb = np.array(im.crop((max(0, xl - 5), ya, min(im.size[0], xr + 6), yb)).convert("RGB"))
@@ -59,7 +61,7 @@ def main():
                 tot += 1; ok += want == got
                 conf[(want, got)] = conf.get((want, got), 0) + 1
                 print(f"{name} g{gi} {c['name'][:26]:26} эталон {want:8} программа {got:8} "
-                      f"(ref long {r['long_frac']} w {r['width']} | got {f and f['long_frac']} w {f and f['width']})", flush=True)
+                      f"[{lines.recognize.why[cvs.index(c)]}] (ref long {r['long_frac']} w {r['width']} | got {f and f['long_frac']} w {f and f['width']})", flush=True)
     print(f"ИТОГ: совпало {ok} из {tot} ({100 * ok / max(1, tot):.0f} %)")
     for k, v in sorted(conf.items()):
         print("  эталон", k[0], "→ программа", k[1], ":", v)
